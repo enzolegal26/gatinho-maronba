@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gatinho Maromba — V8</title>
+<style>
+html,body{margin:0;background:#080b12;color:#fff;font-family:Arial,sans-serif;height:100%;overflow:hidden}
+body{display:flex;align-items:center;justify-content:center}
+#box{width:min(1280px,100vw)}
+canvas{display:block;width:100%;height:auto;background:#59c8f5;border:3px solid #20283b;border-radius:12px;outline:0}
+#menu{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#07101ddd}
+.panel{background:#111a2b;border:2px solid #506080;border-radius:18px;padding:30px;text-align:center;width:min(680px,90%)}
+button{border:0;border-radius:10px;padding:13px 22px;margin:5px;font-weight:900;cursor:pointer}
+.green{background:#45df78}.yellow{background:#ffd34d}
+#hud{display:none;position:absolute;top:0;left:0;right:0;pointer-events:none}
+.h{display:flex;gap:7px;flex-wrap:wrap;padding:8px}.p{background:#1828d7;padding:8px 10px;border-radius:9px;font-weight:900}
+#upgrade{position:absolute;right:12px;top:58px;background:#101522ee;padding:12px;border-radius:12px;display:none;pointer-events:auto}
+#upgrade button{padding:7px 10px}
+#story{position:absolute;bottom:15px;left:50%;transform:translateX(-50%);background:#101522ee;padding:10px 18px;border-radius:12px;font-weight:900;text-align:center;min-width:600px;max-width:85%}
+</style>
+
+<style id="webEnhancements">
+#webTools{position:absolute;top:10px;right:10px;z-index:20;display:flex;gap:6px}
+#webTools button{background:#101827dd;color:#fff;border:1px solid #60708d;padding:8px 11px;border-radius:9px;font-weight:900;cursor:pointer}
+#saveStatus{position:absolute;top:55px;right:10px;background:#101827dd;padding:7px 10px;border-radius:8px;font-size:12px;display:none}
+</style>
+</head>
+<body>
+<div id="box">
+<div id="webTools">
+  <button id="fullscreenBtn">TELA CHEIA</button>
+  <button id="saveBtn">SALVAR</button>
+  <button id="loadBtn">CARREGAR</button>
+</div>
+<div id="saveStatus"></div>
+
+<canvas id="c" width="1280" height="720" tabindex="0"></canvas>
+
+<div id="menu">
+ <div class="panel">
+  <h1>GATINHO MAROMBA</h1>
+  <h2 id="menuTitle">A MÁQUINA DO BANHO FOI ROUBADA!</h2>
+  <p id="menuText">Uma história animada vai mostrar o roubo. Depois você joga de verdade.</p>
+  <button id="begin" class="green">COMEÇAR HISTÓRIA</button>
+  <div id="diffs" style="display:none">
+   <h3>ESCOLHA A DIFICULDADE</h3>
+   <button data-d="easy">FÁCIL</button>
+   <button data-d="normal">NORMAL</button>
+   <button data-d="hard">DIFÍCIL</button>
+  </div>
+ </div>
+</div>
+
+<div id="hud">
+ <div class="h">
+  <span class="p" id="stage"></span><span class="p" id="hp"></span><span class="p" id="coins"></span>
+  <span class="p" id="weapon"></span><span class="p" id="mast"></span><span class="p">X100 C300 B1000</span>
+ </div>
+ <div id="upgrade">
+  <b>UPGRADE DA ARMA</b><br>
+  <button id="upDamage">+DANO</button>
+  <button id="upSpeed">+CADÊNCIA</button>
+  <button id="upRange">+ALCANCE</button>
+  <div id="uinfo"></div>
+ </div>
+ <div id="story">A/D ou ←/→ = andar • ESPAÇO/W/↑ = pular • Z = atacar • X/C/B = técnicas • U = upgrades • P = pausa</div>
+</div>
+</div>
+
+<script>
+(() => {
+"use strict";
+
+const canvas=document.getElementById("c"), ctx=canvas.getContext("2d");
+const W=1280,H=720;
+const keys=new Set();
+var state="menu",difficulty="normal",last=0,paused=false;
+let scene=0,sceneTime=0,sceneDone=false;
+var world,player,enemies,bullets,particles,boss,coins,weapon,mastery,upgrades,level,doorOpen,bossMode,gameOver=false;
+
+const areas=[
+ ["PRAIA DOS GATOS","#58c8f3","#d5b96b","CARANGUEJO"],
+ ["CIDADE DO CAOS","#8ca6b8","#555d69","POLICIAL"],
+ ["LABORATÓRIO MUTANTE","#5a9d69","#3e5143","CIENTISTA"],
+ ["BASE ESPACIAL","#171c48","#555b80","GUARDIÃO"],
+ ["O BANHO","#0b1230","#315277","O BANHO"]
+];
+const weaponNames=["ESPINGARDA","ESPINGARDA DUPLA","ESPINGARDA PESADA","CANHÃO MAROMBA","PUNHO MAROMBA","SOCO DAS MÃOS DELE"];
+const scale={easy:.72,normal:1,hard:1.55};
+
+function setStory(t){document.getElementById("story").textContent=t}
+function hud(){
+ document.getElementById("stage").textContent=`FASE ${level+1} — ${areas[level][0]}`;
+ document.getElementById("hp").textContent=`❤ ${Math.max(0,Math.ceil(player.hp))}/${player.max}`;
+ document.getElementById("coins").textContent=`💰 ${coins}`;
+ document.getElementById("weapon").textContent=`🔫 ${weaponNames[weapon]} LV.${weapon+1}`;
+ document.getElementById("mast").textContent=`⭐ MAESTRIA ${Math.floor(mastery)}/1000`;
+ document.getElementById("uinfo").textContent=`Dano ${upgrades.damage} • Cadência ${upgrades.speed} • Alcance ${upgrades.range}`;
+}
+
+function rectHit(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y}
+function press(code){return keys.has(code)}
+
+addEventListener("keydown",e=>{
+ keys.add(e.code);
+ if(["ArrowLeft","ArrowRight","ArrowUp","Space"].includes(e.code))e.preventDefault();
+ if(state==="cutscene" && (e.code==="Enter"||e.code==="Space")) nextScene();
+ if(state==="game"){
+   if(e.code==="KeyZ") attack();
+   if(e.code==="KeyX") special(100);
+   if(e.code==="KeyC") special(300);
+   if(e.code==="KeyB") special(1000);
+   if(e.code==="KeyU") document.getElementById("upgrade").style.display=
+      document.getElementById("upgrade").style.display==="block"?"none":"block";
+   if(e.code==="KeyP") paused=!paused;
+ }
+});
+addEventListener("keyup",e=>keys.delete(e.code));
+
+document.getElementById("begin").onclick=()=>{
+ document.getElementById("menu").style.display="none";
+ state="cutscene";scene=0;sceneTime=0;sceneDone=false;
+};
+document.querySelectorAll("#diffs button").forEach(b=>b.onclick=()=>startGame(b.dataset.d));
+document.getElementById("upDamage").onclick=()=>buyUpgrade("damage");
+document.getElementById("upSpeed").onclick=()=>buyUpgrade("speed");
+document.getElementById("upRange").onclick=()=>buyUpgrade("range");
+
+function nextScene(){
+ if(state!=="cutscene")return;
+ scene++;
+ sceneTime=0;
+ if(scene>=6){
+  document.getElementById("menu").style.display="flex";
+  document.querySelector("#menu .panel").style.display="block";
+  document.getElementById("begin").style.display="none";
+  document.getElementById("menuTitle").textContent="A MISSÃO COMEÇA!";
+  document.getElementById("menuText").textContent="Agora escolha a dificuldade. A fase é jogável de verdade.";
+  document.getElementById("diffs").style.display="block";
+  state="menu";
+ }
+}
+
+function drawCutscene(){
+ ctx.clearRect(0,0,W,H);
+ const bg=["#58c8f3","#26314a","#1b2538","#161b35","#080d20","#111a2b"][scene];
+ ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
+ ctx.fillStyle="#d5b96b";ctx.fillRect(0,570,W,150);
+
+ let catX=170, zX=1000, machineX=600;
+ if(scene===0){catX=170;zX=1050}
+ if(scene===1){catX=280;zX=850}
+ if(scene===2){catX=350;zX=720;machineX=720}
+ if(scene===3){catX=520;zX=620;machineX=620-sceneTime*120}
+ if(scene===4){catX=300+sceneTime*210;zX=850-sceneTime*210}
+ if(scene===5){catX=650;zX=1080}
+
+ drawCat(catX,500,1,sceneTime*10);
+ if(scene<5)drawZombie(zX,505,sceneTime*9);
+ if(scene<=3)drawMachine(machineX,360,sceneTime);
+
+ if(scene===0){drawBubble(180,110,"Gatinho: Meu treino está perfeito hoje!")}
+ if(scene===1){drawBubble(600,110,"Zumbis: ROUBEM A MÁQUINA!")}
+ if(scene===2){drawBubble(520,110,"O ZUMBI PEGOU O CONTROLE DA MÁQUINA!")}
+ if(scene===3){drawBubble(430,110,"ALARME! A MÁQUINA FOI ROUBADA!")}
+ if(scene===4){drawBubble(360,110,"Gatinho: EI! VOLTEM AQUI!")}
+ if(scene===5){drawBubble(420,110,"Gatinho: VOU RECUPERAR A MÁQUINA!")}
+ ctx.fillStyle="#fff";ctx.font="bold 25px Arial";ctx.textAlign="center";
+ ctx.fillText(`CENA ${scene+1}/6 — ENTER/ESPAÇO PARA AVANÇAR`,W/2,45);
+ ctx.textAlign="left";
+}
+
+function drawBubble(x,y,text){
+ ctx.font="bold 22px Arial";let w=Math.min(780,ctx.measureText(text).width+42);
+ ctx.fillStyle="#101522ee";ctx.fillRect(x,y,w,58);
+ ctx.fillStyle="#fff";ctx.fillText(text,x+20,y+37);
+}
+function drawMachine(x,y,t){
+ ctx.save();ctx.translate(x,y);
+ ctx.fillStyle="#aeb8c8";ctx.fillRect(-90,0,180,115);
+ ctx.fillStyle="#20283a";ctx.fillRect(-65,25,130,45);
+ ctx.fillStyle="#54f17a";ctx.fillRect(-45,35,90,20);
+ ctx.fillStyle="#f2c94c";ctx.beginPath();ctx.arc(0,85,22+Math.sin(t*8)*4,0,7);ctx.fill();
+ ctx.strokeStyle="#cbd5e1";ctx.lineWidth=7;ctx.beginPath();ctx.moveTo(-75,115);ctx.lineTo(-75,145);ctx.moveTo(75,115);ctx.lineTo(75,145);ctx.stroke();
+ ctx.restore();
+}
+function drawCat(x,y,dir,walk){
+ ctx.save();ctx.translate(x+25,y+35);ctx.scale(dir,1);
+ const a=Math.sin(walk)*9;
+ ctx.fillStyle="#6e421d";ctx.lineWidth=13;ctx.strokeStyle="#6e421d";ctx.lineCap="round";
+ ctx.beginPath();ctx.moveTo(-12,20);ctx.lineTo(-14+a,50);ctx.moveTo(12,20);ctx.lineTo(14-a,50);ctx.stroke();
+ ctx.fillStyle="#e99a35";ctx.beginPath();ctx.ellipse(0,0,34,42,0,0,7);ctx.fill();
+ ctx.strokeStyle="#e99a35";ctx.lineWidth=17;ctx.beginPath();ctx.moveTo(-25,-8);ctx.lineTo(-45,-2-a*.3);ctx.moveTo(25,-8);ctx.lineTo(45,-2+a*.3);ctx.stroke();
+ ctx.fillStyle="#f2ad49";ctx.beginPath();ctx.arc(0,-39,31,0,7);ctx.fill();
+ ctx.beginPath();ctx.moveTo(-25,-56);ctx.lineTo(-13,-83);ctx.lineTo(-3,-56);ctx.moveTo(25,-56);ctx.lineTo(13,-83);ctx.lineTo(3,-56);ctx.fill();
+ ctx.fillStyle="#111";ctx.beginPath();ctx.arc(-10,-41,4,0,7);ctx.arc(10,-41,4,0,7);ctx.fill();
+ ctx.restore();
+}
+function drawZombie(x,y,walk){
+ ctx.save();ctx.translate(x+23,y+30);const a=Math.sin(walk)*11;
+ ctx.fillStyle="#5c9362";ctx.beginPath();ctx.ellipse(0,0,25,32,0,0,7);ctx.fill();
+ ctx.strokeStyle="#3c6442";ctx.lineWidth=11;ctx.beginPath();ctx.moveTo(-10,22);ctx.lineTo(-12+a,48);ctx.moveTo(10,22);ctx.lineTo(12-a,48);ctx.stroke();
+ ctx.strokeStyle="#6ba16f";ctx.lineWidth=9;ctx.beginPath();ctx.moveTo(-18,-4);ctx.lineTo(-38,7-a*.3);ctx.moveTo(18,-4);ctx.lineTo(38,7+a*.3);ctx.stroke();
+ ctx.fillStyle="#75a876";ctx.beginPath();ctx.arc(0,-32,26,0,7);ctx.fill();
+ ctx.fillStyle="#fff15e";ctx.fillRect(-13,-37,8,7);ctx.fillRect(5,-37,8,7);
+ ctx.restore();
+}
+
+function startGame(d){
+ difficulty=d;
+ const saved=window.__GM_SAVE;
+ if(saved && saved.difficulty===d){
+   level=Math.max(0,Math.min(4,Number(saved.level)||0));
+   coins=Math.max(0,Number(saved.coins)||0);
+   weapon=Math.max(0,Math.min(5,Number(saved.weapon)||0));
+   mastery=Math.max(0,Math.min(1000,Number(saved.mastery)||0));
+   upgrades=Object.assign({damage:0,speed:0,range:0},saved.upgrades||{});
+ }else{
+   level=0;coins=30;weapon=0;mastery=0;upgrades={damage:0,speed:0,range:0};
+ }
+ document.getElementById("menu").style.display="none";
+ document.getElementById("hud").style.display="block";
+ state="game";paused=false;gameOver=false;loadLevel();
+ canvas.focus();
+}
+function loadLevel(){
+ const length=10000+level*900;
+ world={length};
+ player={x:100,y:450,w:48,h:70,vx:0,vy:0,ground:false,hp:120,max:120,dir:1,walk:0,inv:0};
+ enemies=[];bullets=[];particles=[];boss=null;bossMode=false;doorOpen=false;
+ const platforms=[{x:0,y:600,w:850,h:120}];
+ let x=620;
+ for(let i=0;i<42;i++){
+   x+=80;
+   const y=490-(i%6)*48;
+   const w=190+(i%4)*35;
+   platforms.push({x,y,w,h:26});
+   x+=w;
+ }
+ world.platforms=platforms;
+ world.spikes=[];
+ world.levers=[];
+ world.pistons=[];
+ for(let i=0;i<platforms.length;i++){
+   const p=platforms[i];
+   if(i>0&&i%5===0)world.spikes.push({x:p.x+55,y:p.y-20,w:62,h:20});
+   if(i>0&&i%6===0)world.pistons.push({x:p.x+p.w/2-22,y:p.y-150,w:44,h:150,t:i});
+   if(i>2&&i%7===0)world.levers.push({x:p.x+p.w-35,y:p.y-55,on:false});
+ }
+ world.levers.push({x:length-1900,y:540,on:false},{x:length-1500,y:540,on:false},{x:length-1100,y:540,on:false});
+ for(let i=0;i<18+level*5;i++){
+   const p=platforms[1+Math.floor(Math.random()*(platforms.length-1))];
+   enemies.push({x:p.x+40,y:p.y-62,w:46,h:62,vx:0,vy:0,ground:false,hp:(120+level*55)*scale[difficulty],max:(120+level*55)*scale[difficulty],walk:Math.random()*8,attack:0,alive:true});
+ }
+ boss={x:length-600,y:445,w:130,h:135,hp:(2200+level*800)*scale[difficulty],max:(2200+level*800)*scale[difficulty],timer:1};
+ setStory("CHEGUE AO FINAL DA FASE. Ative as 5 alavancas e passe pelos obstáculos.");
+ hud();
+}
+function physics(o,dt){
+ o.vy+=1900*dt;o.y+=o.vy*dt;o.ground=false;
+ for(const p of world.platforms){
+  if(o.x+o.w>p.x&&o.x<p.x+p.w&&o.y+o.h>=p.y&&o.y+o.h<=p.y+38&&o.vy>=0){
+   o.y=p.y-o.h;o.vy=0;o.ground=true;
+  }
+ }
+}
+function hurt(n){if(player.inv>0)return;player.hp-=n;player.inv=.7;player.vy=-380}
+function attack(){
+ if(state!=="game"||paused)return;
+ const cd=Math.max(.12,.34-upgrades.speed*.035);
+ if(player.attackCd>0)return;
+ player.attackCd=cd;
+ const damage=(35+weapon*18)*(1+upgrades.damage*.2);
+ bullets.push({x:player.x+24,y:player.y+28,vx:player.dir*(900+upgrades.range*80),vy:0,r:12+upgrades.range*3,d:damage,t:1.1});
+ mastery=Math.min(1000,mastery+5);
+}
+function special(n){
+ if(state!=="game"||paused||mastery<n)return;
+ mastery-=n;
+ const damage=n===100?180:n===300?420:1200;
+ const count=n===100?5:n===300?9:1;
+ for(let i=0;i<count;i++){
+  const spread=n===100?(i-2)*90:n===300?(i-4)*65:0;
+  bullets.push({x:player.x+24,y:player.y+25,vx:player.dir*(1050+upgrades.range*60),vy:spread,r:n===1000?42:16,d:damage,t:1.4});
+ }
+ setStory(n===100?"X — RAJADA MAROMBA!":n===300?"C — TIRO DEVASTADOR!":"B — SOCO DAS MÃOS DELE!");
+}
+function buyUpgrade(k){
+ const cost=40+upgrades[k]*35;
+ if(coins<cost){setStory(`Faltam ${cost-coins} moedas para este upgrade.`);return}
+ coins-=cost;upgrades[k]++;setStory("UPGRADE COMPRADO!");hud();
+}
+function bossAttack(){
+ if(level===0){
+  for(let i=-2;i<=2;i++)bullets.push({x:boss.x+65,y:boss.y+40,vx:Math.sign(player.x-boss.x)*700,vy:i*180,r:18,d:30,t:1.4});
+ }else if(level===1){
+  for(let i=0;i<3;i++)bullets.push({x:boss.x+65,y:boss.y+45,vx:Math.sign(player.x-boss.x)*850,vy:(i-1)*120,r:13,d:38,t:1.2});
+ }else if(level===2){
+  for(let i=0;i<6;i++)bullets.push({x:player.x-200+i*80,y:30,vx:0,vy:650,r:16,d:32,t:1.1});
+ }else if(level===3){
+  for(let i=-2;i<=2;i++)bullets.push({x:boss.x+65,y:boss.y+50,vx:Math.sign(player.x-boss.x)*950,vy:i*220,r:13,d:42,t:1.2});
+ }else{
+  for(let i=-3;i<=3;i++)bullets.push({x:player.x+i*90,y:0,vx:0,vy:900,r:17,d:48,t:1});
+ }
+}
+function update(dt){
+ if(state!=="game"||paused)return;
+ player.attackCd=Math.max(0,(player.attackCd||0)-dt);player.inv=Math.max(0,player.inv-dt);
+ let d=(press("KeyD")||press("ArrowRight")?1:0)-(press("KeyA")||press("ArrowLeft")?1:0);
+ player.vx=d*(410+upgrades.speed*18);player.x+=player.vx*dt;
+ if(d)player.dir=d;
+ player.walk+=Math.abs(d)*dt*10;
+ if((press("Space")||press("KeyW")||press("ArrowUp"))&&player.ground){player.vy=-760;player.ground=false;keys.delete("Space");keys.delete("ArrowUp");keys.delete("KeyW")}
+ physics(player,dt);
+ player.x=Math.max(0,Math.min(world.length-player.w,player.x));
+
+ for(const s of world.spikes)if(rectHit(player,s))hurt(20*scale[difficulty]);
+ for(const q of world.pistons){
+  q.t+=dt;const active=Math.sin(q.t*3)>0;
+  if(active&&rectHit(player,{x:q.x,y:q.y+35,w:q.w,h:q.h-35}))hurt(25*scale[difficulty]);
+ }
+ for(const l of world.levers){
+  if(!l.on&&Math.abs(player.x-l.x)<58&&Math.abs(player.y-l.y)<105){
+   l.on=true;setStory(`ALAVANCA ${world.levers.filter(v=>v.on).length}/5`);
+  }
+ }
+ if(world.levers.filter(v=>v.on).length>=5&&!doorOpen){doorOpen=true;setStory("5/5! A PORTA DO CHEFE ABRIU!");}
+
+ for(const e of enemies)if(e.alive){
+  e.walk+=dt*9;
+  const dx=player.x-e.x;
+  if(Math.abs(dx)>8)e.x+=Math.sign(dx)*(135+level*25)*scale[difficulty]*dt;
+  physics(e,dt);
+  if(rectHit(player,e))hurt(14*scale[difficulty]);
+ }
+ if(doorOpen&&player.x>world.length-1600&&!bossMode&&boss.hp>0){bossMode=true;setStory(`CHEFE: ${areas[level][3]}!`)}
+ if(bossMode&&boss.hp>0){
+  boss.x+=Math.sign(player.x-boss.x)*(55+level*10)*dt;
+  boss.timer-=dt;if(boss.timer<=0){boss.timer=level===0?1.25:.85;bossAttack()}
+  if(rectHit(player,boss))hurt(22*scale[difficulty]);
+ }
+ for(let i=bullets.length-1;i>=0;i--){
+  const b=bullets[i];b.x+=b.vx*dt;b.y+=b.vy*dt;b.t-=dt;
+  let remove=b.t<=0||b.x<0||b.x>world.length+500||b.y<-100||b.y>H+100;
+  if(!remove)for(const e of enemies)if(e.alive&&Math.abs(b.x-e.x-23)<42+b.r&&Math.abs(b.y-e.y-30)<48+b.r){e.hp-=b.d;remove=true;mastery=Math.min(1000,mastery+10);if(e.hp<=0){e.alive=false;coins+=8;burst(e.x,e.y)}break}
+  if(!remove&&bossMode&&boss.hp>0&&Math.abs(b.x-boss.x-65)<85+b.r&&Math.abs(b.y-boss.y-65)<90+b.r){boss.hp-=b.d;remove=true;mastery=Math.min(1000,mastery+15)}
+  if(remove)bullets.splice(i,1);
+ }
+ if(bossMode&&boss.hp<=0){bossMode=false;coins+=250;setStory("CHEFE DERROTADO! Vá até a bandeira.");}
+ if(!bossMode&&boss.hp<=0&&player.x>world.length-250){
+  if(level<4){
+   level++;loadLevel();
+   try{localStorage.setItem("gatinho_maromba_save_v1",JSON.stringify({level,coins,weapon,mastery,upgrades,difficulty}));}catch(e){}
+  }else{state="win";document.getElementById("hud").style.display="none";document.getElementById("menu").style.display="flex";document.getElementById("menuTitle").textContent="VOCÊ ZEROU!";document.getElementById("menuText").textContent="A máquina foi recuperada e os zumbis perderam.";document.getElementById("begin").style.display="none";document.getElementById("diffs").style.display="none"}
+ }
+ if(player.y>H+120||player.hp<=0){state="dead";document.getElementById("hud").style.display="none";document.getElementById("menu").style.display="flex";document.getElementById("menuTitle").textContent="GAME OVER";document.getElementById("menuText").textContent="Clique em uma dificuldade para tentar novamente.";document.getElementById("begin").style.display="none";document.getElementById("diffs").style.display="block"}
+ hud();
+}
+function burst(x,y){for(let i=0;i<18;i++)particles.push({x,y,vx:(Math.random()-.5)*300,vy:-Math.random()*330,t:.8})}
+
+function drawGame(){
+ ctx.clearRect(0,0,W,H);
+ let cam=Math.max(0,Math.min(world.length-W,player.x-390));
+ ctx.save();ctx.translate(-cam,0);
+ ctx.fillStyle=areas[level][1];ctx.fillRect(cam,0,W,H);
+ ctx.fillStyle="#ffffff22";
+ for(let x=Math.floor(cam/280)*280;x<cam+W+500;x+=280){ctx.beginPath();ctx.moveTo(x,600);ctx.lineTo(x+100,300);ctx.lineTo(x+230,600);ctx.fill()}
+ for(const p of world.platforms){ctx.fillStyle=areas[level][2];ctx.fillRect(p.x,p.y,p.w,p.h);ctx.fillStyle="#31382d";ctx.fillRect(p.x,p.y,p.w,6)}
+ for(const s of world.spikes){ctx.fillStyle="#e53c4d";for(let x=s.x;x<s.x+s.w;x+=14){ctx.beginPath();ctx.moveTo(x,s.y+20);ctx.lineTo(x+7,s.y-5);ctx.lineTo(x+14,s.y+20);ctx.fill()}}
+ for(const q of world.pistons){const active=Math.sin(q.t*3)>0;ctx.fillStyle="#657183";ctx.fillRect(q.x,q.y+35,q.w,q.h-35);ctx.fillStyle="#e9edf2";ctx.fillRect(q.x,q.y+(active?0:35),q.w,35)}
+ for(const l of world.levers){ctx.strokeStyle="#4d3119";ctx.lineWidth=9;ctx.beginPath();ctx.moveTo(l.x,l.y+40);ctx.lineTo(l.x,l.y);ctx.stroke();ctx.fillStyle=l.on?"#45e675":"#e64050";ctx.beginPath();ctx.arc(l.x,l.y,13,0,7);ctx.fill()}
+ if(doorOpen){ctx.fillStyle="#45df78";ctx.fillRect(world.length-1750,340,12,235)}
+ for(const e of enemies)if(e.alive)drawZombie(e.x,e.y,e.walk);
+ if(bossMode&&boss.hp>0)drawBoss(boss);
+ for(const b of bullets){ctx.fillStyle="#ffe15a";ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,7);ctx.fill()}
+ drawCat(player.x,player.y,player.dir,player.walk);
+ for(const p of particles){ctx.globalAlpha=p.t;ctx.fillStyle="#fff";ctx.fillRect(p.x,p.y,6,6);ctx.globalAlpha=1}
+ ctx.restore();
+ if(bossMode&&boss.hp>0){ctx.fillStyle="#111";ctx.fillRect(390,95,500,14);ctx.fillStyle="#ef3e4d";ctx.fillRect(390,95,500*Math.max(0,boss.hp/boss.max),14)}
+ if(paused){ctx.fillStyle="#000b";ctx.fillRect(0,0,W,H);ctx.fillStyle="#fff";ctx.font="bold 60px Arial";ctx.textAlign="center";ctx.fillText("PAUSADO",W/2,H/2);ctx.textAlign="left"}
+}
+function drawBoss(b){
+ ctx.save();ctx.translate(b.x+65,b.y+65);
+ if(level===0){ctx.fillStyle="#b66a45";ctx.beginPath();ctx.ellipse(0,0,60,48,0,0,7);ctx.fill();ctx.strokeStyle="#e0a552";ctx.lineWidth=22;ctx.beginPath();ctx.moveTo(-45,0);ctx.lineTo(-105,-35);ctx.moveTo(45,0);ctx.lineTo(105,-35);ctx.stroke()}
+ if(level===1){ctx.fillStyle="#586b82";ctx.fillRect(-58,-65,116,130);ctx.fillStyle="#172238";ctx.fillRect(-42,-28,84,38);ctx.strokeStyle="#6eeaff";ctx.lineWidth=10;ctx.beginPath();ctx.moveTo(-45,30);ctx.lineTo(-100,45);ctx.moveTo(45,30);ctx.lineTo(100,45);ctx.stroke()}
+ if(level===2){ctx.fillStyle="#9d5ab3";ctx.beginPath();ctx.ellipse(0,0,60,68,0,0,7);ctx.fill();ctx.fillStyle="#c5ff61";ctx.fillRect(-42,-15,84,14)}
+ if(level===3){ctx.fillStyle="#536583";ctx.fillRect(-60,-65,120,130);ctx.fillStyle="#12172b";ctx.fillRect(-43,-25,86,37);ctx.fillStyle="#ff4769";ctx.fillRect(-26,-12,52,9)}
+ if(level===4){ctx.fillStyle="#79a6da";ctx.beginPath();ctx.ellipse(0,0,62,72,0,0,7);ctx.fill();ctx.strokeStyle="#dff7ff";ctx.lineWidth=13;ctx.beginPath();ctx.arc(0,0,77,0,7);ctx.stroke()}
+ ctx.restore();
+}
+function draw(){
+ if(state==="cutscene")drawCutscene();
+ else if(state==="game")drawGame();
+ else {ctx.clearRect(0,0,W,H);ctx.fillStyle="#0b1020";ctx.fillRect(0,0,W,H)}
+}
+function loop(t){
+ const dt=Math.min(.033,(t-last)/1000||0);last=t;
+ if(state==="cutscene"){sceneTime+=dt;if(sceneTime>5&&!sceneDone){sceneDone=true;setTimeout(()=>{if(state==="cutscene")nextScene()},250)}}
+ update(dt);draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+
+<script>
+(() => {
+  const KEY="gatinho_maromba_save_v1";
+  const status=document.getElementById("saveStatus");
+  function show(t){
+    status.textContent=t; status.style.display="block";
+    clearTimeout(show.t); show.t=setTimeout(()=>status.style.display="none",1600);
+  }
+  window.GMWeb={
+    save(){
+      try{
+        const data={
+          level:window.level, coins:window.coins, weapon:window.weapon,
+          mastery:window.mastery, upgrades:window.upgrades,
+          difficulty:window.difficulty
+        };
+        localStorage.setItem(KEY,JSON.stringify(data));
+        show("Jogo salvo neste navegador!");
+      }catch(e){show("Não foi possível salvar.");}
+    },
+    load(){
+      try{
+        const raw=localStorage.getItem(KEY);
+        if(!raw){show("Nenhum save encontrado.");return;}
+        const d=JSON.parse(raw);
+        window.__GM_SAVE=d;
+        show("Save encontrado! Comece o jogo para carregar.");
+      }catch(e){show("Save inválido.");}
+    }
+  };
+  document.getElementById("saveBtn").onclick=()=>GMWeb.save();
+  document.getElementById("loadBtn").onclick=()=>GMWeb.load();
+  document.getElementById("fullscreenBtn").onclick=async()=>{
+    try{
+      if(!document.fullscreenElement) await document.documentElement.requestFullscreen();
+      else await document.exitFullscreen();
+    }catch(e){show("Tela cheia não disponível neste navegador.");}
+  };
+})();
+</script>
+
+<script>
+window.addEventListener("beforeunload",()=>{
+  try{
+    if(typeof level!=="undefined"){
+      localStorage.setItem("gatinho_maromba_save_v1",
+        JSON.stringify({level,coins,weapon,mastery,upgrades,difficulty}));
+    }
+  }catch(e){}
+});
+</script>
+</body>
+</html>
